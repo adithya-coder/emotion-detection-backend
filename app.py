@@ -4,19 +4,51 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 from tensorflow.keras.models import load_model
+import logging
+import sys
+
+# Suppress TensorFlow warnings for faster startup
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 CORS(app)
 
+logger.info("Starting Emotion Detection Backend...")
+
 # Initialize face cascade classifier
+logger.info("Loading Haar Cascade...")
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+logger.info("Haar Cascade loaded")
 
 class_names = ['Anger', 'Fear', 'Happy', 'Neutral', 'Sad']
 img_height, img_width = 48, 48
 MODEL_DIR = os.path.abspath("models/face")
 MODEL_FILENAME = 'Face_Emotion1.h5'
 
-# Load the trained model
-model = load_model(os.path.join(MODEL_DIR, MODEL_FILENAME))
+# Load the trained model at startup
+logger.info("Loading emotion detection model (this may take 30-60 seconds)...")
+try:
+    model = load_model(os.path.join(MODEL_DIR, MODEL_FILENAME), compile=False)
+    logger.info("Model loaded successfully!")
+    
+    # Warm up the model with a dummy prediction
+    logger.info("Warming up model...")
+    dummy_input = np.zeros((1, 48, 48, 3), dtype=np.float32)
+    _ = model.predict(dummy_input, verbose=0)
+    logger.info("Model warmed up and ready!")
+    logger.info("✅ Application ready to accept requests")
+except Exception as e:
+    logger.error(f"❌ Failed to load model: {str(e)}")
+    model = None
 def preprocess_image(img_array):
     """
     Preprocess the image for emotion detection:
@@ -63,6 +95,8 @@ def detect():
     image_file = request.files['image']
 
     try:
+        logger.info("Received image for emotion detection")
+        
         # Read the file content once and store it in memory
         file_content = image_file.read()
 
@@ -84,10 +118,13 @@ def detect():
             return jsonify({"error": "Error processing image"}), 400
 
         # Make prediction
-        predictions = model.predict(input_data)
+        logger.info("Making prediction...")
+        predictions = model.predict(input_data, verbose=0)
         class_idx = np.argmax(predictions)
         confidence = np.max(predictions) * 100
         emotion = class_names[class_idx]
+        
+        logger.info(f"Prediction: {emotion} ({confidence:.2f}%)")
 
         return jsonify({
             "Emotion": emotion,
@@ -95,6 +132,7 @@ def detect():
         })
 
     except Exception as e:
+        logger.error(f"Error in detection: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -170,11 +208,27 @@ def detect_with_questionnaire():
 @app.route('/', methods=['GET'])
 def health_check():
     """Health check endpoint for Docker"""
-    return jsonify({
-        "status": "healthy",
-        "service": "emotion-detection-backend",
-        "version": "1.0.0"
-    }), 200
+    try:
+        # Verify model is loaded
+        if model is not None:
+            return jsonify({
+                "status": "healthy",
+                "service": "emotion-detection-backend",
+                "version": "1.0.0",
+                "model_loaded": True
+            }), 200
+        else:
+            return jsonify({
+                "status": "unhealthy",
+                "service": "emotion-detection-backend",
+                "error": "Model not loaded"
+            }), 503
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e)
+        }), 503
 
 
 if __name__ == '__main__':
